@@ -180,7 +180,7 @@ __device__ void print_array_2d(int *array, int x_size, int y_size){
     }
     //printf("\n");
 }
-__global__ void run_2048(const int * d_state, int *d_result, int search_depth, long seed ){
+__global__ void run_2048(const int * d_state, int *d_result, int search_depth, long seed, int init_state_offset ){
     int No = blockIdx.x * blockDim.x + threadIdx.x; 
 
     curandState curand_state;
@@ -188,7 +188,7 @@ __global__ void run_2048(const int * d_state, int *d_result, int search_depth, l
 
     int tid  = threadIdx.x;
 
-    int init_state = threadIdx.x;
+    int init_state = threadIdx.x + init_state_offset;
     int depth = search_depth;
 
     int  l_state[16];
@@ -202,7 +202,7 @@ __global__ void run_2048(const int * d_state, int *d_result, int search_depth, l
     zero_num = judge_over(l_state);
     while(depth && zero_num!=-1)
     {           
-        //if(No==0){printf("After new: turn:%d  \n",turn); print_array_2d(l_state,4,4);}
+        //if(No==1){printf("After new: turn:%d  \n",turn); print_array_2d(l_state,4,4);}
         turn = init_state%4;
         init_state/=4;
         depth-=1;
@@ -212,7 +212,7 @@ __global__ void run_2048(const int * d_state, int *d_result, int search_depth, l
         score+=result*(result>0);
         if(zero_num>0 && result!=-1)
             curand_state=newBlock(l_state, curand_state,No);
-        //if(No==0){printf("turn:%d score:%d \n",turn,score); print_array_2d(l_state,4,4);}
+        //if(No==1){printf("turn:%d score:%d \n",turn,score); print_array_2d(l_state,4,4);}
     }
 
     int count=0;
@@ -261,42 +261,57 @@ int get_best_turn(int *h_state, int exp_num=5000, int search_depth=2, bool print
 
     long clock_for_rand = clock();
 
-    const int search_kinds = (1<<(search_depth*2));
+    const int search_kinds_total = (1<<(search_depth*2));
+    const int search_kinds = std::min(search_kinds_total, 1<<10);
+    const int search_kinds_times = search_kinds_total / search_kinds; 
+    //printf("search_kinds_times: %d \n",search_kinds_times);
 
-    int *d_result;
-    int *h_result=new int[search_kinds];
-    const int RESULT_BYTES = search_kinds*sizeof(int);
-    for(int i=0; i<search_kinds; i++) h_result[i]=0;
-
-    cudaMalloc((void **) &d_result, RESULT_BYTES); 
-    cudaMemset((void **) d_result, 0, RESULT_BYTES);
-    cudaMemcpy(d_result, h_result, RESULT_BYTES , cudaMemcpyHostToDevice);
-
-    //timer.Start();
-    run_2048<<<exp_num, search_kinds >>>(d_state, d_result, search_depth, clock_for_rand);
-    //timer.Stop();
-
-    cudaMemcpy(h_result, d_result, RESULT_BYTES, cudaMemcpyDeviceToHost);
-
-    int max=-10000000;
+    int global_best_score = 0;
+    int max=-1000000000;
     int best_way=0;
-    for(int i=0;i<search_kinds;i++){
-        if(h_result[i]>max){
-            max = h_result[i];
-            best_way = i;
+    int best_turn = best_way%4;
+    int init_state_offset = 0;
+
+    for(int j=0; j<search_kinds_times; ++j) {
+        int *d_result;
+        int *h_result=new int[search_kinds];
+        const int RESULT_BYTES = search_kinds*sizeof(int);
+        for(int i=0; i<search_kinds; i++) h_result[i]=0;
+        //printf("before main loop mem ops %d \n", RESULT_BYTES);
+
+        cudaMalloc((void **) &d_result, RESULT_BYTES); 
+        cudaMemset((void **) d_result, 0, RESULT_BYTES);
+        cudaMemcpy(d_result, h_result, RESULT_BYTES , cudaMemcpyHostToDevice);
+
+        //timer.Start();
+        run_2048<<<exp_num, search_kinds >>>(d_state, d_result, search_depth, clock_for_rand, init_state_offset);
+        //timer.Stop();
+
+        cudaMemcpy(h_result, d_result, RESULT_BYTES, cudaMemcpyDeviceToHost);
+
+        for(int i=0;i<search_kinds;i++){
+            if(h_result[i]>max){
+                max = h_result[i];
+                best_way = i;
+            }
         }
+
+        cudaFree(d_result);
+        init_state_offset+=search_kinds;
+
+        global_best_score = std::max(global_best_score, h_result[best_way]);
+
     }
 
-    int best_turn = best_way%4;
-
     if(print_flag){
-        print_array2(h_result, search_kinds);
-        printf("Best way is %d , Best score = %d , Best turn is %d \n", 
-                best_way, h_result[best_way], best_turn);
+        //print_array2(h_result, search_kinds);
+        //printf("Best way is %d , Best score = %d , Best turn is %d \n", 
+        //        best_way, h_result[best_way], best_turn);
+        printf("global_best_score: %d \n", global_best_score);
     }
 
     cudaFree(d_state);
-    cudaFree(d_result);
+
     return best_turn;
 }
 
